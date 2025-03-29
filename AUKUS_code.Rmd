@@ -1,0 +1,509 @@
+---
+title: "AUKUS and the Gravity Framewrok"
+author: "Michele Andreoni, Marta Cacopardo, Javier Ospital"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list =ls())
+```
+
+```{r Load Libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(fixest)  
+library(readr)  
+library(countrycode)
+library(ggplot2)
+library(scales) 
+library(modelsummary)
+library(readxl)
+```
+
+## 1. Load and Clean GDP Data
+
+```{r Load GDP Data, message=FALSE, warning=FALSE}
+gdp_data <- read_csv("/Users/javieroctavioospitalgreslebin/Downloads/WDI_GDP/a4451800-a44a-443a-9309-9013872205ad_Data.csv")
+
+# Clean GDP Data
+gdp_data <- gdp_data %>%
+  filter(`Series Code` == "NY.GDP.MKTP.CD") %>%
+  select(`Country Name`, `Country Code`, matches("\\d{4}")) %>%
+  pivot_longer(cols = -c(`Country Name`, `Country Code`), 
+               names_to = "Year", 
+               values_to = "GDP") %>%
+  mutate(Year = as.numeric(str_extract(Year, "\\d{4}")),
+         GDP = as.numeric(trimws(GDP))) %>%
+  filter(Year >= 2013)
+```
+
+## 2. Load and Clean Trade Data
+
+```{r Load Trade Data, message=FALSE, warning=FALSE}
+trade_data <- read_csv("/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration/TradeData_2_26_2025_19_55_48.csv")
+
+
+trade_data <- trade_data %>%
+  select(reporterISO, partnerISO, refYear, flowDesc, fobvalue) %>%  
+  filter(reporterISO == "AUS") %>%  
+  rename(Year = refYear, Exporter = reporterISO, Importer = partnerISO, Trade_Value = fobvalue) %>%
+  mutate(Trade_Value = as.numeric(Trade_Value)) %>%
+  filter(!is.na(Trade_Value))
+```
+
+## 3. Load and Clean CEPII Data
+
+```{r Load CEPII Data, message=FALSE, warning=FALSE}
+gravity_data <- readRDS("/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration/Gravity_rds_V202211/Gravity_V202211.rds") %>% as_tibble()
+
+gravity_data <- gravity_data %>%
+  filter(!is.na(iso3_o) & !is.na(iso3_d)) %>%  
+  filter(year == 2021) %>%  
+  select(iso3_o, iso3_d, year, dist, distcap, distw_harmonic) %>%
+  rename(Exporter = iso3_o, Importer = iso3_d, Distance = dist,
+         Capital_Distance = distcap, Pop_Weighted_Distance = distw_harmonic)
+```
+
+## 4. Merge Trade, GDP, and CEPII Data
+
+```{r Merge Data, message=FALSE, warning=FALSE}
+# select relevant variables 
+gdp_data <- gdp_data%>%
+  filter(`Country Code` != "WLD")
+
+gravity_data  <- gravity_data %>% drop_na
+
+trade_data <- trade_data %>%
+  filter(!Importer %in% c("W00", "X1", "_X"))
+
+trade_gdp <- trade_data %>%
+  left_join(gdp_data, by = c("Exporter" = "Country Code", "Year")) %>%
+  rename(GDP_Exporter = GDP) %>%
+  left_join(gdp_data, by = c("Importer" = "Country Code", "Year")) %>%
+  rename(GDP_Importer = GDP) %>%
+  left_join(gravity_data, by = c("Exporter", "Importer"))
+
+trade_gdp <- trade_gdp %>% # filter "World", "X1", "_X"
+  select(Exporter, Importer, Year, flowDesc, Trade_Value, GDP_Exporter, GDP_Importer, Distance)
+#Create log-transformed variables
+trade_gdp <- trade_gdp %>%
+  mutate(log_GDP_Exporter = log(GDP_Exporter),
+         log_GDP_Importer = log(GDP_Importer),
+         log_Distance = log(Distance))
+```
+
+## **5. Define AUKUS Treatment Variable, AUKUS and China dummies**
+
+```{r Create AUKUS Treatment Variables}
+# Define AUKUS partners
+aukus_countries <- c("USA", "GBR")
+
+# Create post-AUKUS dummy (1 if 2022 and later, else 0)
+trade_gdp <- trade_gdp %>%
+  mutate(
+    Post_AUKUS = ifelse(Year >= 2022, 1, 0),
+    AUKUS_Partner = ifelse(Importer %in% aukus_countries, 1, 0)
+  )
+```
+
+```{r China dummy, FE }
+  	
+# Create China-partner dummy
+trade_gdp <- trade_gdp %>%
+  mutate(
+    AUKUS_Partner = ifelse(Importer %in% c("USA", "GBR"), 1, 0),
+    China_Partner = ifelse(Importer == "CHN", 1, 0)
+  )
+
+# And, we create a country-pair identifier
+trade_gdp <- trade_gdp %>%
+  mutate(Exporter_Importer = paste0(Exporter, "_", Importer))
+```
+
+## **6. Run Gravity Model (PPML) with Country-Pair Fixed Effects**
+
+```{r ppml_model_aukus_china_fe }
+
+ppml_model_aukus_china_fe <- feglm(
+  Trade_Value ~ log_GDP_Exporter + log_GDP_Importer + log_Distance + 
+    Post_AUKUS * AUKUS_Partner + Post_AUKUS * China_Partner | 
+    Exporter + Importer + Year,  # Fixed Effects
+  data = trade_gdp, 
+  family = poisson
+)
+
+summary(ppml_model_aukus_china_fe)
+```
+
+## **7. Include Geopolitical Alignment Measures**
+
+```{r Load Geopolitical Data, message=FALSE, warning=FALSE}
+ideal_points <- read_csv("/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration/dataverse_files/IdealpointestimatesAll_Jun2024.csv")
+agreement_scores <- read_csv("/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration/dataverse_files/AgreementScoresAll_Jun2024.csv")
+
+agreement_clean <- agreement_scores %>%
+  select(ccode1, ccode2, year, agree) %>%
+  rename(Exporter_Code = ccode1, Importer_Code = ccode2, Year = year, Agreement_Score = agree) %>%
+  mutate(Exporter = countrycode(Exporter_Code, origin = "cown", destination = "iso3c"),
+         Importer = countrycode(Importer_Code, origin = "cown", destination = "iso3c")) %>%
+  select(Year, Exporter, Importer, Agreement_Score)
+```
+
+```{r Merge Geopolitical Data}
+trade_gdp <- trade_gdp %>%
+  left_join(agreement_clean, by = c("Exporter", "Importer", "Year")) %>%
+  filter(Year < 2024)  # Remove 2024 since no agreement data is available
+
+```
+
+## **8. Run Gravity Model (PPML) with Geopolitical Alignment**
+
+Run Gravity Model (PPML) with Country-Pair Fixed Effects
+
+```{r PPML Model with Geopolitical Agreement}
+
+ppml_model_geo_china <- feglm(
+  Trade_Value ~ log_GDP_Exporter + log_GDP_Importer + log_Distance + 
+                Post_AUKUS + Agreement_Score + 
+                AUKUS_Partner + China_Partner + 
+                Post_AUKUS * AUKUS_Partner + 
+                Post_AUKUS * China_Partner + 
+                Post_AUKUS * Agreement_Score |  
+  Exporter + Importer + Year, 
+  data = trade_gdp, 
+  family = poisson
+)
+summary(ppml_model_geo_china)
+
+```
+
+### **9.Create Regression Table***
+
+
+```{r Create Regression Table, warning=FALSE, message=FALSE}
+# Save the LaTeX output to a file
+modelsummary(
+  list( "PPML with FE and Agreement Score" = ppml_model_geo_china),
+  output = "/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration//table.tex",
+  title = "PPML Regression Results: AUKUS and Geopolitical Alignment",
+  stars = TRUE,
+  statistic = "std.error",  # This ensures only standard errors are shown
+  gof_map = c("nobs", "r.squared"),
+  coef_map = c("log_GDP_Importer" = "log(GDP Importer)",
+               "log_Distance" = "log(Distance)",
+               "Post_AUKUS" = "Post AUKUS",
+               "Agreement_Score" = "Agreement Score",
+               "AUKUS_Partner" = "UK and US",
+               "China_Partner" = "China",
+               "Post_AUKUS:AUKUS_Partner" = "UK and US (post AUKUS)",
+               "Post_AUKUS:China_Partner" = "China (post AUKUS)",
+               "Post_AUKUS:Agreement_Score" = "Agreement Score (post AUKUS)"))
+
+```
+
+
+
+
+
+
+### **10.Making Plots***
+
+```{r Prepare data for visualization, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Ensure Year is numeric
+trade_gdp <- trade_gdp %>%
+  mutate(Year = as.numeric(Year))
+
+# Aggregate trade by year and country group
+trade_trends <- trade_gdp %>%
+  group_by(Year, China_Partner, AUKUS_Partner) %>%
+  summarise(Trade_Value = sum(Trade_Value, na.rm = TRUE)) %>%
+  ungroup()
+
+# Create a new column for group labels
+trade_trends <- trade_trends %>%
+  mutate(Group = case_when(
+    China_Partner == 1 ~ "China",
+    AUKUS_Partner == 1 ~ "AUKUS Partners",
+    TRUE ~ "Other Countries"
+  ))
+```
+
+
+### *10.1 Figure 1: Trade Trends*
+```{r Figure 1 Trade Trends, warning=FALSE, echo=FALSE}
+
+# Filter out "Other Countries" and reformat the dataset
+trade_trends <- trade_gdp %>%
+  filter(AUKUS_Partner == 1 | China_Partner == 1) %>%  # Exclude "Other Countries"
+  group_by(Year, China_Partner, AUKUS_Partner) %>%
+  summarise(Trade_Value = sum(Trade_Value, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(Group = case_when(
+    China_Partner == 1 ~ "China",
+    AUKUS_Partner == 1 ~ "AUKUS Partners"
+  ))
+
+# Create the line plot with formatted trade values
+ggplot(trade_trends, aes(x = Year, y = Trade_Value, color = Group)) +
+  geom_line(size = 1.2) +
+  geom_vline(xintercept = 2021, linetype = "dashed", color = "black") +  # Mark AUKUS announcement
+  scale_y_continuous(labels = scales::label_number(scale = 1e-9, suffix = "B", accuracy = 0.1)) +  # Convert to Billions (B)
+  scale_color_manual(values = c("China" = "#E15759", "AUKUS Partners" = "#4E79A7")) +  # Red for China, Blue for AUKUS
+  labs(title = "Trade Trends with AUKUS Partners & China",
+       subtitle = "Dashed line marks the announcement of AUKUS in 2021",
+       x = "Year", y = "Total Trade Value (Billion EUR)",
+       color = "Country Group") +
+  theme_minimal()
+ggsave("trade trends.pdf", width = 8, height = 6)
+```  
+  
+
+
+### *10.2 Figure 2: Change in Trade*
+
+```{r Figure 2: Trade Change Pre/Post AUKUS, warning=FALSE, echo=FALSE}
+
+# Compute percentage change from 2021 to 2022
+trade_change <- trade_gdp %>%
+  filter(Year %in% c(2021, 2022)) %>%  # Keep only 2021 and 2022
+  group_by(Year, China_Partner, AUKUS_Partner) %>%
+  summarise(Total_Trade_Value = sum(Trade_Value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = Year, values_from = Total_Trade_Value, names_prefix = "Year_") %>%
+  mutate(Trade_Change = (Year_2022 - Year_2021) / Year_2021 * 100,  # Compute % change
+         Group = case_when(
+           China_Partner == 1 ~ "China",
+           AUKUS_Partner == 1 ~ "AUKUS Partners"
+         )) %>%
+  filter(!is.na(Group))  # Remove NA groups
+
+# Colors: China = Red (#E15759), AUKUS = Blue (#4E79A7)
+ggplot(trade_change, aes(x = Group, y = Trade_Change, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +  # Add baseline reference
+  scale_fill_manual(values = c("China" = "#E15759", "AUKUS Partners" = "#4E79A7")) +  # Set colors
+  labs(title = "Change in Trade from 2021 to 2022",
+       subtitle = "Percentage Change in Trade Value (Comparing 2021 to 2022)",
+       x = "Country Group", y = "Percentage Change in Trade") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove redundant legend
+
+```
+
+
+Now, we load data on interventions on trade from China and AUKUS partners on trade with Australia from Global Trade Alert (GTA).
+```{r Load Interventions on Trade Data, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Define file path
+file_path <- "/Users/javieroctavioospitalgreslebin/Downloads/Trade_Migration/interventions_GTA.xlsx"
+
+# Load the Excel file
+gta_data <- read_excel(file_path)
+
+```
+
+And we separate the data the data into Harmful and liberalizing interventions on date. 
+```{r Clean Interventions on Trade Data, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Ensure Date Announced is in Date format
+gta_data <- gta_data %>%
+  mutate(`Date Announced` = ymd(`Date Announced`))
+
+# Filter for the three countries of interest
+selected_countries <- c("United Kingdom", "United States of America", "China")
+
+# Separate datasets for Green and Red interventions
+gta_green <- gta_data %>%
+  filter(`Implementing Jurisdictions` %in% selected_countries, `GTA Evaluation` == "Green") %>%
+  mutate(Year = year(`Date Announced`)) %>%
+  group_by(Year, `Implementing Jurisdictions`) %>%
+  summarise(Num_Interventions = n(), .groups = "drop")
+
+gta_red <- gta_data %>%
+  filter(`Implementing Jurisdictions` %in% selected_countries, `GTA Evaluation` == "Red") %>%
+  mutate(Year = year(`Date Announced`)) %>%
+  group_by(Year, `Implementing Jurisdictions`) %>%
+  summarise(Num_Interventions = n(), .groups = "drop")
+
+# Define the AUKUS announcement year
+aukus_announcement_year <- 2021
+```
+
+### *10.3 Figure 3: Trends on Liberalizing Interventions on Trade*
+```{r Figure 3: Liberalizing Interventions, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Create the Green interventions plot (Liberalizing)
+p1 <- ggplot(gta_green, aes(x = Year, y = Num_Interventions, color = `Implementing Jurisdictions`)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +  
+  geom_vline(xintercept = aukus_announcement_year, linetype = "dashed", color = "black") + 
+  annotate("text", x = aukus_announcement_year + 0.3, y = max(gta_green$Num_Interventions, na.rm = TRUE),
+           label = "AUKUS", angle = 0, vjust = 2, hjust = 0.2, size = 4) +
+  labs(
+       subtitle = "Liberalizing Interventions on Trade with Australia by the UK, US, and China",
+       x = "", y = "Number of Interventions",
+       color = "" ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+print(p1)
+
+```
+
+
+### *10.4 Figure 4: Trends on Harmful Interventions on Trade*
+```{r Figure 4: Harmful Interventions on trade, warning=FALSE, message=FALSE, echo=FALSE}
+
+# Create the Red interventions plot (Harmful)
+p2 <- ggplot(gta_red, aes(x = Year, y = Num_Interventions, color = `Implementing Jurisdictions`)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +  
+  geom_vline(xintercept = aukus_announcement_year, linetype = "dashed", color = "black") + 
+  annotate("text", x = aukus_announcement_year + 0.3, y = max(gta_red$Num_Interventions, na.rm = TRUE),
+           label = "AUKUS", angle = 0, vjust = 2, hjust = 0.2, size = 4) +
+  labs(
+       subtitle = "Harmful Interventions on Trade with Australia by the UK, US, and China",
+       x = "", y = "Number of Interventions",
+       color = "") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Print the plots
+print(p2)
+```
+
+### *10.5 Figure 5: Agreement Scores and Geographic Distance*
+
+```{r Figure 5: Agreement Scores and Distance, echo=FALSE}
+top60_destinations <- trade_gdp %>%
+  filter(Exporter == "AUS", Importer != "W00",, Importer != "_X", flowDesc =="Export")%>%
+  group_by(Year)%>%
+  slice_max(order_by = Trade_Value, n = 60) %>%
+  select(Exporter, Importer, Year, Trade_Value)
+
+top60_origins <- trade_gdp %>%
+  filter(Exporter == "AUS", Importer != "W00", Importer != "_X", flowDesc == "Import") %>%
+  group_by(Year) %>%
+  slice_max(order_by = Trade_Value, n = 60) %>%
+  select(Exporter, Importer, Year, Trade_Value, GDP_Importer) %>%
+  rename(GDP = GDP_Importer)
+
+merged_top60 <- inner_join(top60_destinations, top60_origins, 
+                           by = c("Exporter", "Importer", "Year"),
+                           suffix = c("_dest", "_orig")) %>%
+  mutate(Trade_Value = Trade_Value_dest + Trade_Value_orig) %>%
+  select(Exporter, Importer, Year, Trade_Value, GDP)
+
+dist <- gravity_data %>%
+  filter(Exporter == "AUS", Importer != "AUS")%>%
+  select(Exporter, Importer, Distance)
+
+# Ensure dist has unique Exporter–Importer combinations
+dist_unique <- dist %>% distinct(Exporter, Importer, .keep_all = TRUE)
+
+
+plots <- list()
+
+for (yr in 2015:2023) {
+  
+  # Filter data for the current year
+  partners_year <- merged_top60 %>% filter(Year == yr)
+  geo_allign_year <- agreement_clean %>% filter(Exporter == "AUS", Year == yr)
+  
+  # Join the trade data with the agreement data (year-specific)
+  df_year <- inner_join(partners_year, geo_allign_year, by = c("Exporter", "Importer")) %>%
+    select(Exporter, Importer, Trade_Value, Agreement_Score) %>%
+    # Join with distance data (which doesn't depend on year)
+    inner_join(dist_unique, by = c("Exporter", "Importer")) %>%
+    select(Exporter, Importer, Trade_Value, Agreement_Score, Distance) %>%
+    # Calculate trade share for the year (sum over all trade values in that year)
+    mutate(Trade_Value = Trade_Value / sum(Trade_Value)) %>%
+    rename(Australia = Exporter,
+           `Trade Partner` = Importer,
+           `Trade Share` = Trade_Value,
+           `Agreement Score` = Agreement_Score)
+  
+  # Create the plot for the current year
+  p <- ggplot(df_year, aes(x = Distance, y = `Agreement Score`, size =  `Trade Share`,
+                             color = case_when(
+                               `Trade Partner` == "CHN" ~ "CHN",
+                               `Trade Partner` == "USA" ~ "USA",
+                               `Trade Partner` == "GBR" ~ "GBR",
+                               TRUE ~ "Other"
+                             ))) +
+    geom_point(shape=16, alpha = 1) +
+    scale_color_manual(
+      values = c("CHN" = "#E15759", "USA" = "#4E79A7", "GBR"= "#4DAF4A", "Other" = "black"),
+      name = "Trade Partners"
+    ) +
+    scale_size_continuous(range = c(1, 10)) +
+    labs(x = "Geographic Distance",
+         y = "Agreement Score",
+         size = "Trade Volume") +
+    ggtitle(paste("Year:", yr)) +
+    theme_minimal()
+  
+  # Store the plot in the list using the year as the name
+  plots[[as.character(yr)]] <- p
+  
+  ggsave(filename = paste0("Trade_Plot_Distance_", yr, ".pdf"), plot = p, width = 8, height = 6)
+}
+
+# To view the plot for a specific year (e.g., 2015), you can simply print it:
+print(plots[["2015"]])
+print(plots[["2023"]])
+
+```
+
+### *10.6 Figure 6: Agreement Scores and GDP*
+```{r Figure 6: Agreement Scores and GDP, echo=FALSE}
+plots <- list()
+
+for (yr in 2015:2023) {
+  
+  # Filter data for the current year
+  partners_year <- merged_top60 %>% filter(Year == yr)
+  geo_allign_year <- agreement_clean %>% filter(Exporter == "AUS", Year == yr)
+  
+  # Join the trade data with the agreement data (year-specific)
+  df_year <- inner_join(partners_year, geo_allign_year, by = c("Exporter", "Importer")) %>%
+    select(Exporter, Importer, Trade_Value, Agreement_Score, GDP) %>%
+    # Calculate trade share for the year (sum over all trade values in that year)
+    mutate(Trade_Value = Trade_Value / sum(Trade_Value)) %>%
+    rename(Australia = Exporter,
+           `Trade Partner` = Importer,
+           `Trade Share` = Trade_Value,
+           `Agreement Score` = Agreement_Score)
+  
+  # Create the plot for the current year
+  p <- ggplot(df_year, aes(x = log(GDP), y = `Agreement Score`, size =  `Trade Share`,
+                             color = case_when(
+                               `Trade Partner` == "CHN" ~ "CHN",
+                               `Trade Partner` == "USA" ~ "USA",
+                               `Trade Partner` == "GBR" ~ "GBR",
+                               TRUE ~ "Other"
+                             ))) +
+    geom_point(shape=16, alpha = 1) +
+    scale_color_manual(
+      values = c("CHN" = "#E15759", "USA" = "#4E79A7", "GBR"= "#4DAF4A", "Other" = "black"),
+      name = "Trade Partners"
+    ) +
+    scale_size_continuous(range = c(1, 10)) +
+    labs(x = "log(GDP) of Trading Partner",
+         y = "Agreement Score",
+         size = "Trade Volume") +
+    ggtitle(paste("Year:", yr)) +
+    theme_minimal()
+  
+  # Store the plot in the list using the year as the name
+  plots[[as.character(yr)]] <- p
+  ggsave(filename = paste0("Trade_Plot_GDPs_", yr, ".pdf"), plot = p, width = 8, height = 6)
+}
+
+# To view the plot for a specific year (e.g., 2015), you can simply print it:
+print(plots[["2015"]])
+print(plots[["2023"]])
+
+```
+
