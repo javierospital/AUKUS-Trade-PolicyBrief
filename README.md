@@ -1,4 +1,5 @@
-# AUKUS and the Gravity Framework: Trade Diversion or Creation?
+# AUKUS and the Gravity Framework:
+# Trade Diversion or Creation?
 
 This repository contains the code and materials for our policy brief analyzing the impact of the AUKUS security agreement on Australia’s international trade patterns. This project analyzes whether the 2021 AUKUS security agreement between Australia, the UK, and the US led to trade diversion from China or trade creation with AUKUS partners. It includes a policy brief, replication code in R (.Rmd, .html), and a gravity model estimated using PPML. Data sources include UN Comtrade, World Bank, CEPII, and GTA.
 
