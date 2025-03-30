@@ -7,8 +7,8 @@ This repository contains the code and materials for our policy brief analyzing t
 We apply a gravity model to evaluate the trade effects of the AUKUS partnership announced in September 2021. Our findings suggest:
 - Trade with China fell significantly post-AUKUS.
 - No substantial trade creation with AUKUS partners (UK, US) was observed.
-- Geopolitical alignment continues to play a key role in trade flows.
-- 
+- Geopolitical alignment plays a key role in trade flows.
+  
 We find evidence that Australia’s accession to AUKUS has contributed to trade diversion away from China without generating offsetting trade creation with AUKUS partners, highlighting potential economic costs to its geopolitical realignment.
 
 
